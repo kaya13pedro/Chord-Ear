@@ -79,6 +79,12 @@ body { background: var(--bg); color: var(--ink); font-family: var(--font-body); 
 .bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .15s linear; }
 #mBass { color: var(--bass); }
 
+.rhythm { display: grid; gap: 8px; border-top: 1px solid var(--line); padding-top: 12px; }
+.rh-head { display: flex; align-items: center; gap: 8px 10px; flex-wrap: wrap; }
+.rh-head .lab { font-family: var(--font-mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); }
+.bpm { font-family: var(--font-mono); font-size: 14px; font-variant-numeric: tabular-nums; margin-right: auto; white-space: nowrap; }
+.seg.len button { padding: 5px 9px; font-size: 12px; }
+#tl { width: 100%; height: 84px; display: block; }
 .levelrow { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .levelrow .lab { font-family: var(--font-mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); }
 .level { position: relative; flex: 1 1 120px; height: 10px; border-radius: 5px; background: var(--track); overflow: hidden; }
@@ -162,6 +168,17 @@ body { background: var(--bg); color: var(--ink); font-family: var(--font-body); 
         </div>
       </div>
 
+      <div class="rhythm">
+        <div class="rh-head">
+          <span class="lab">Rhythm</span>
+          <span class="bpm" id="bpm">96 BPM</span>
+          <div class="seg len" role="group" aria-label="Shortest chord">
+            <button data-b="1" aria-pressed="false">1 beat</button><button data-b="2" aria-pressed="false">2 beats</button><button data-b="4" aria-pressed="false">1 bar</button>
+          </div>
+        </div>
+        <canvas id="tl" role="img" aria-label="Chord timeline with beats and bar lines"></canvas>
+      </div>
+
       <div class="meters">
         <div class="meter"><span class="lab">Match</span><span class="val" id="mMatch">–</span><div class="bar"><i id="mMatchBar"></i></div></div>
         <div class="meter"><span class="lab">Lowest note</span><span class="val" id="mBass">–</span></div>
@@ -200,7 +217,8 @@ body { background: var(--bg); color: var(--ink); font-family: var(--font-body); 
       </div>
       <div class="diagrams" id="diagrams"></div>
       <p class="hint">Tap a shape to hear it. Orange dots are the root.</p>
-      <p class="foot">Strum and let it ring near the mic. Chords that share the same notes, like Am7 and C6 or Asus4 and Dsus2, are told apart by the lowest note; the other reading shows under “Could also be”.</p>
+      <p class="foot">After a few strums Chord Ear finds the beat and only changes chord on a beat, once the new chord has lasted at least the length you set under Rhythm. Bar lines start from the first chord change. Without a steady beat it waits for about a second of the new chord.</p>
+      <p class="foot">Chords that share the same notes, like Am7 and C6 or Asus4 and Dsus2, are told apart by the lowest note; the other reading shows under “Could also be”.</p>
     </section>
   </main>
 </div>
@@ -459,23 +477,281 @@ function analyzePeaks(peaks, tuneCents) {
 }
 
 const MATCH = { exp: 1.0, floor: 0.04, ext: 1.03, bassYes: 1.08, bassNo: 0.93 };
-function matchChords(chroma, bassPc, top = 6) {
-  const max = Math.max(...chroma); if (!(max > 0)) return [];
+function prepChroma(chroma) {
+  const max = Math.max(...chroma); if (!(max > 0)) return null;
   const v = chroma.map(c => Math.max(0, Math.pow(c / max, MATCH.exp) - MATCH.floor));
-  const vn = Math.sqrt(v.reduce((s, x) => s + x * x, 0)); if (!vn) return [];
+  const vn = Math.sqrt(v.reduce((s, x) => s + x * x, 0)); if (!vn) return null;
+  return { v, vn };
+}
+function scoreWith(pv, bassPc, r, q) {
+  let dot = 0; const tones = new Set();
+  for (const [s] of q.iv) { const pc = (r + s) % 12; tones.add(pc); dot += pv.v[pc]; }
+  let score = dot / (pv.vn * Math.sqrt(q.iv.length)) * (q.prior === 1 ? 1 : Math.min(1, q.prior * MATCH.ext));
+  if (bassPc !== null && bassPc !== undefined) score *= bassPc === r ? MATCH.bassYes : tones.has(bassPc) ? 1.0 : MATCH.bassNo;
+  return score;
+}
+function matchChords(chroma, bassPc, top = 6) {
+  const pv = prepChroma(chroma); if (!pv) return [];
   const res = [];
-  for (let r = 0; r < 12; r++) for (const q of QUALITIES) {
-    let dot = 0; const tones = new Set();
-    for (const [s] of q.iv) { const pc = (r + s) % 12; tones.add(pc); dot += v[pc]; }
-    let score = dot / (vn * Math.sqrt(q.iv.length)) * (q.prior === 1 ? 1 : Math.min(1, q.prior * MATCH.ext));
-    if (bassPc !== null) score *= bassPc === r ? MATCH.bassYes : tones.has(bassPc) ? 1.0 : MATCH.bassNo;
-    res.push({ root: r, q: q.k, score });
-  }
+  for (let r = 0; r < 12; r++) for (const q of QUALITIES) res.push({ root: r, q: q.k, score: scoreWith(pv, bassPc, r, q) });
   res.sort((a, b) => b.score - a.score);
   return res.slice(0, top);
 }
+function scoreChord(chroma, bassPc, root, qk) {
+  const pv = prepChroma(chroma); return pv ? scoreWith(pv, bassPc, mod12(root), QMAP[qk]) : 0;
+}
 
-if (typeof module !== 'undefined') module.exports = { HCFG, MATCH, TUNING, QUALITIES, QMAP, chordName, chordTones, getVoicings, analyzeShape, shapeFits, findPeaks, analyzePeaks, matchChords, mod12 };
+// A single plucked note: almost all strong partials are harmonics of one fundamental
+function detectSingle(peaks, tuneCents) {
+  if (!peaks.length) return null;
+  const amax = Math.max(...peaks.map(p => p.a));
+  const sig = peaks.filter(p => p.a >= 0.2 * amax).sort((x, y) => x.f - y.f);
+  let f0 = sig[0].f, bestR = 0;
+  // phone mics often lose the fundamental: also try half and a third of the lowest partial
+  for (const d of [1, 2, 3]) {
+    const c = sig[0].f / d; if (c < 75) break;
+    let eH = 0, eAll = 0;
+    for (const p of sig) { const h = Math.round(p.f / c), e = p.a * p.a; eAll += e; if (h >= 1 && h <= 12 && Math.abs(1200 * Math.log2(p.f / (h * c))) < 30) eH += e; }
+    if (eH / eAll > bestR + 0.02) { bestR = eH / eAll; f0 = c; }
+  }
+  if (bestR <= 0.88) return null;
+  const m = midiOf(f0) - tuneCents / 100, rm = Math.round(m);
+  const mr = midiOf(f0), rr = Math.round(mr);
+  return { pc: mod12(rm), oct: Math.floor(rm / 12) - 1, hz: f0, cents: Math.round((mr - rr) * 100) };
+}
+
+// ---------- Rhythm: strum onsets and beat period ----------
+function median(a) { if (!a.length) return 0; const b = a.slice().sort((x, y) => x - y); return b[b.length >> 1]; }
+class Rhythm {
+  constructor() { this.reset(); }
+  reset() { this.odf = []; this.onsets = []; this.period = 0.6; this.conf = 0; this.locked = false; this.lastOnset = -9; this.lastEst = -9; this.minFlux = 1.2; }
+  // t = audio time of the short frame, v = spectral flux; returns onset time or null
+  push(t, v, live) {
+    this.odf.push([t, v]);
+    while (this.odf.length && this.odf[0][0] < t - 3) this.odf.shift();
+    const n = this.odf.length; if (n < 4) return null;
+    const [tp, vp] = this.odf[n - 2], vpp = this.odf[n - 3][1];
+    const rec = []; for (const [tt, vv] of this.odf) if (tt > t - 1.2) rec.push(vv);
+    const med = median(rec);
+    if (live && vp > vpp && vp >= v && vp > med * 1.6 + this.minFlux && tp - this.lastOnset > 0.1) {
+      this.lastOnset = tp; this.onsets.push([tp, vp - med]); return tp;
+    }
+    return null;
+  }
+  estimate(now) {
+    if (now - this.lastEst < 0.5) return; this.lastEst = now;
+    this.onsets = this.onsets.filter(o => o[0] > now - 12);
+    const on = this.onsets;
+    if (on.length < 5 || now - on[on.length - 1][0] > 3.5) { this.conf = 0; this.locked = false; return; }
+    const smax = Math.max(...on.map(o => o[1]));
+    const w = on.map(o => Math.sqrt(o[1] / smax));
+    let best = 0, bestT = 0, sum = 0, cnt = 0;
+    for (let T = 0.33; T <= 1.25; T += 0.005) {
+      let sc = 0; const sg = 0.018 + 0.025 * T;
+      for (let i = 0; i < on.length; i++) for (let j = i + 1; j < on.length; j++) {
+        const d = on[j][0] - on[i][0]; if (d > 4.4 * T) break;
+        const k = Math.round(d / T); if (k < 1) continue;
+        const e = (d - k * T) / sg; sc += w[i] * w[j] * Math.exp(-0.5 * e * e);
+      }
+      sc *= Math.exp(-0.5 * Math.pow(Math.log2(T / 0.6) / 0.9, 2));
+      sum += sc; cnt++;
+      if (sc > best) { best = sc; bestT = T; }
+    }
+    this.conf = best / (sum / cnt + 1e-9);
+    const lockAt = this.locked ? 1.35 : 1.7;
+    if (this.conf > lockAt) {
+      if (!this.locked || Math.abs(bestT - this.period) / this.period > 0.08) this.period = bestT;
+      else this.period += (bestT - this.period) * 0.3;
+      this.locked = true;
+      // beat phase: the grid that catches the strongest strums (down-strokes land on the beat)
+      const P = this.period, rec = on.filter(o => o[0] > now - 8);
+      let bestPh = null, bestS = -1;
+      for (const o of rec) {
+        let sc = 0;
+        for (const p of rec) { let dd = (p[0] - o[0]) / P; dd -= Math.round(dd); sc += Math.sqrt(p[1] / smax) * Math.exp(-0.5 * Math.pow(dd * P / 0.04, 2)); }
+        if (sc > bestS) { bestS = sc; bestPh = o[0]; }
+      }
+      if (bestPh !== null) { this.phase = bestPh; this.phaseVer = (this.phaseVer || 0) + 1; }
+    } else this.locked = false;
+  }
+  bpm() { return this.locked ? 60 / this.period : null; }
+}
+
+// ---------- Chord tracking on the beat grid ----------
+class ChordTracker {
+  constructor() { this.minBeats = 2; this.min = 0.5; this.reset(); }
+  reset() {
+    this.frames = []; this.pending = []; this.beatLog = []; this.segments = []; this.onsetLog = [];
+    this.cur = null; this.cand = null; this.beatIdx = 0; this.lastChangeIdx = 0; this.anchorIdx = null;
+    this.beatStart = null; this.nextBeat = null; this.lastHot = -9; this.lastRes = []; this.wasLocked = false; this.processedTo = null;
+  }
+  addFrame(f) {
+    this.frames.push(f); if (f.hot) this.lastHot = f.t;
+    while (this.frames.length && this.frames[0].t < f.t - 8) this.frames.shift();
+  }
+  onOnset(t, rh) {
+    this.onsetLog.push(t); while (this.onsetLog.length && this.onsetLog[0] < t - 20) this.onsetLog.shift();
+    const P = rh.locked ? rh.period : 0.5;
+    if (this.beatStart === null) { this.beatStart = t; this.nextBeat = t + P; return; }
+    if (rh.locked) {
+      const d = t - this.nextBeat;
+      if (Math.abs(d) < 0.3 * P) this.nextBeat += d * 0.45;
+    } else if (t - this.beatStart > 0.3) {
+      this.pending.push({ s: this.beatStart, e: t }); this.beatStart = t; this.nextBeat = t + P;
+    }
+  }
+  clock(now, rh) {
+    if (this.beatStart === null) return;
+    if (this.lastHot > 0 && now - this.lastHot > 1.6) {
+      this.pending.push({ s: this.beatStart, e: Math.min(now, this.nextBeat) });
+      this.beatStart = null; this.nextBeat = null; this.cand = null; return;
+    }
+    const P = rh.locked ? rh.period : 0.5;
+    if (rh.locked && rh.phase !== undefined && rh.phaseVer !== this.phaseVer) {
+      // tempo/phase estimate updated: move the grid onto it if it has drifted
+      this.phaseVer = rh.phaseVer;
+      let k = Math.round((this.nextBeat - rh.phase) / P), nb = rh.phase + k * P;
+      if (nb - this.beatStart < 0.3 * P) nb += P;
+      if (!this.wasLocked || Math.abs(nb - this.nextBeat) > 0.15 * P) {
+        while (nb <= now) nb += P;
+        this.nextBeat = nb; if (nb - this.beatStart > 1.5 * P) this.beatStart = nb - P;
+      }
+    }
+    this.wasLocked = rh.locked;
+    if (this.nextBeat - this.beatStart > 1.6 * P) this.nextBeat = this.beatStart + P;
+    while (now >= this.nextBeat) { this.pending.push({ s: this.beatStart, e: this.nextBeat }); this.beatStart = this.nextBeat; this.nextBeat += P; }
+  }
+  process(frameNow) {
+    const out = [];
+    while (this.pending.length && this.pending[0].e + 0.04 <= frameNow) {
+      const ev = this.decide(this.pending.shift()); if (ev) out.push(ev);
+    }
+    return out;
+  }
+  decide(beat) {
+    if (beat.e - beat.s < 0.12) return null;
+    const idx = this.beatIdx++;
+    this.beatLog.push({ t: beat.s, e: beat.e, idx }); while (this.beatLog.length > 80) this.beatLog.shift();
+    this.processedTo = beat.e;
+    const fr = this.frames.filter(f => f.t >= beat.s + 0.03 && f.t < beat.e + 0.03);
+    const hot = fr.filter(f => f.hot && f.chroma);
+    if (hot.length < 2 || hot.length < fr.length * 0.35) return null;
+    let obj;
+    const singles = hot.filter(f => f.note);
+    let avg = null, bass = null;
+    if (singles.length >= hot.length * 0.8) {
+      const cnt = new Map(); for (const f of singles) { const k = f.note.pc + ':' + f.note.oct; cnt.set(k, (cnt.get(k) || 0) + 1); }
+      const k = [...cnt.entries()].sort((a, b) => b[1] - a[1])[0][0];
+      const note = singles.filter(f => f.note.pc + ':' + f.note.oct === k).pop().note;
+      obj = { kind: 'note', id: 'n' + k, note, score: 1 };
+    } else {
+      avg = new Array(12).fill(0);
+      const bc = new Array(12).fill(0);
+      for (const f of hot) { const m = Math.max(...f.chroma) || 1; for (let i = 0; i < 12; i++) avg[i] += f.chroma[i] / m; if (f.bassPc !== null) bc[f.bassPc]++; }
+      const bm = Math.max(...bc); bass = bm >= hot.length * 0.3 ? bc.indexOf(bm) : null;
+      const res = matchChords(avg, bass); if (!res.length) return null;
+      this.lastRes = res;
+      obj = { kind: 'chord', id: res[0].root + ':' + res[0].q, root: res[0].root, q: res[0].q, score: res[0].score, bassPc: bass };
+    }
+    const cur = this.cur;
+    if (!cur) return obj.score >= this.min ? this.commit(obj, beat.s, idx, avg, bass) : null;
+    let curScore = 0;
+    if (cur.kind === 'chord' && avg) curScore = scoreChord(avg, bass, cur.root, cur.q);
+    else if (cur.id === obj.id) curScore = obj.score;
+    if (obj.id === cur.id || obj.score < this.min || obj.score - curScore < 0.035) {
+      cur.e = beat.e; this.cand = null;
+      // keep the whole segment's evidence; it can refine the label (Am7 -> Am) without adding a change
+      if (avg && cur.kind === 'chord') {
+        for (let i = 0; i < 12; i++) cur.acc[i] += avg[i];
+        if (bass !== null) cur.bc[bass]++;
+        const bm = Math.max(...cur.bc), sb = bm ? cur.bc.indexOf(bm) : null;
+        const res = matchChords(cur.acc, sb);
+        const now = scoreChord(cur.acc, sb, cur.root, cur.q);
+        if (res.length && res[0].root === cur.root && res[0].q !== cur.q && res[0].score > now + 0.02) {
+          cur.q = res[0].q; cur.id = cur.root + ':' + cur.q; cur.score = res[0].score;
+          return { type: 'relabel', seg: cur };
+        }
+      }
+      return { type: 'hold', score: obj.id === cur.id ? obj.score : curScore };
+    }
+    const adv = obj.score - curScore;
+    if (this.cand && this.cand.id === obj.id && this.cand.lastIdx === idx - 1) { this.cand.n++; this.cand.adv += adv; this.cand.lastIdx = idx; this.cand.obj = obj; }
+    else this.cand = { id: obj.id, obj, n: 1, adv, sIdx: idx, s: beat.s, lastIdx: idx };
+    const g = this.minBeats, off = this.cand.sIdx - this.lastChangeIdx, mean = this.cand.adv / this.cand.n;
+    let need = off < g ? 3 : off % g === 0 ? (mean > 0.12 ? 1 : 2) : 2;
+    if (obj.kind === 'note' && cur.kind === 'chord') need = Math.max(need, 2);
+    cur.e = beat.e;
+    if (this.cand.n >= need) {
+      const c = this.cand; this.cand = null;
+      // same root, one chord inside the other, right after the change: a correction, not a new chord
+      const inside = (a, b) => { const A = new Set(QMAP[a.q].iv.map(x => x[0])); return QMAP[b.q].iv.every(x => A.has(x[0])); };
+      if (c.obj.kind === 'chord' && cur.kind === 'chord' && c.obj.root === cur.root && c.sIdx - cur.sIdx <= 2 && (inside(c.obj, cur) || inside(cur, c.obj))) {
+        cur.q = c.obj.q; cur.id = c.obj.id; cur.score = c.obj.score; cur.e = beat.e;
+        return { type: 'relabel', seg: cur };
+      }
+      return this.commit(c.obj, c.s, c.sIdx, avg, bass);
+    }
+    return { type: 'pending', cand: this.cand };
+  }
+  commit(obj, s, sIdx, avg, bass) {
+    if (this.cur) this.cur.e = s;
+    const seg = Object.assign({}, obj, { s, e: Math.max(s, this.processedTo || s), sIdx, acc: avg ? avg.slice() : new Array(12).fill(0), bc: new Array(12).fill(0) });
+    if (bass !== null && bass !== undefined) seg.bc[bass]++;
+    this.segments.push(seg); while (this.segments.length > 60) this.segments.shift();
+    this.cur = seg; this.lastChangeIdx = sIdx;
+    if (this.anchorIdx === null || ((sIdx - this.anchorIdx) % 2 + 2) % 2 === 1) this.anchorIdx = sIdx;
+    return { type: 'change', seg };
+  }
+  isBar(idx) { return this.anchorIdx !== null && (((idx - this.anchorIdx) % 4) + 4) % 4 === 0; }
+}
+
+// ---------- One analysis frame: level gate, onsets, chroma, tracking ----------
+class Listener {
+  constructor() { this.rhythm = new Rhythm(); this.track = new ChordTracker(); this.reset(); }
+  reset() { this.rhythm.reset(); this.track.reset(); this.noise = 0.0005; this.gate = 0.001; this.tune = 0; this.prevShort = null; }
+  // d: {rms, dt, longDb, longBinHz, longCenter, shortDb, shortBinHz, shortCenter, muted}; P: sensitivity
+  frame(now, d, P) {
+    const r = { hot: false, onset: null, chroma: null, bassPc: null, note: null, events: [] };
+    this.noise = d.rms < this.noise ? this.noise * 0.8 + d.rms * 0.2 : this.noise * 0.9995 + d.rms * 0.0005;
+    this.gate = Math.max(P.floor, this.noise * P.mul);
+    const { peaks, maxDb } = findPeaks(d.longDb, d.longBinHz);
+    let sum = 0, cnt = 0;
+    for (let k = Math.floor(70 / d.longBinHz), k1 = Math.ceil(1400 / d.longBinHz); k <= k1; k++) if (d.longDb[k] > -200) { sum += d.longDb[k]; cnt++; }
+    const prom = cnt ? maxDb - sum / cnt : 0;
+    r.hot = (d.rms > this.gate || (prom > P.prom && d.rms > P.floor * 0.4)) && !d.muted && peaks.length > 0;
+    // strum onsets from a short window: mean rise in dB across 80 Hz – 5 kHz
+    if (d.shortDb) {
+      const sd = d.shortDb, k0 = Math.max(1, Math.floor(80 / d.shortBinHz)), k1 = Math.min(sd.length - 1, Math.ceil(5000 / d.shortBinHz));
+      if (this.prevShort) {
+        let fl = 0;
+        for (let k = k0; k <= k1; k++) { const a = Math.max(sd[k], -100), b = Math.max(this.prevShort[k], -100); if (a > b) fl += a - b; }
+        fl /= (k1 - k0 + 1);
+        const on = this.rhythm.push(now - d.shortCenter, fl, !d.muted && d.rms > this.gate * 0.6);
+        if (on !== null) { r.onset = on; this.track.onOnset(on, this.rhythm); }
+      }
+      this.prevShort = Float32Array.from(sd);
+    }
+    this.rhythm.estimate(now);
+    const ft = now - d.longCenter;
+    if (r.hot) {
+      const an = analyzePeaks(peaks, this.tune);
+      if (an.tuneEst !== null) {
+        let dd = an.tuneEst - this.tune; if (dd > 50) dd -= 100; if (dd < -50) dd += 100;
+        this.tune += dd * Math.min(1, d.dt * 0.6);
+        if (this.tune > 50) this.tune -= 100; if (this.tune < -50) this.tune += 100;
+      }
+      const mx = Math.max(...an.chroma);
+      if (mx > 0) { r.chroma = an.chroma.map(c => c / mx); r.bassPc = an.bassPc; r.note = detectSingle(peaks, this.tune); }
+      else r.hot = false;
+    }
+    this.track.addFrame({ t: ft, hot: r.hot, chroma: r.chroma, bassPc: r.bassPc, note: r.note });
+    this.track.clock(ft, this.rhythm);
+    r.events = this.track.process(ft);
+    return r;
+  }
+}
+
+if (typeof module !== 'undefined') module.exports = { HCFG, MATCH, TUNING, QUALITIES, QMAP, chordName, chordTones, getVoicings, analyzeShape, shapeFits, findPeaks, analyzePeaks, matchChords, scoreChord, detectSingle, Rhythm, ChordTracker, Listener, mod12, midiOf };
 
 </script>
 <script>
@@ -489,8 +765,7 @@ if (typeof module !== 'undefined') module.exports = { HCFG, MATCH, TUNING, QUALI
     mode: 'example', hold: false, labels: 'interval',
     chroma: new Float32Array(12), draw: new Float32Array(12),
     shown: null, score: 0, alts: [], bassPc: null, tune: 0,
-    cand: null, candT: 0, quiet: true, noise: 0.0005, prevRms: 0, muteUntil: 0,
-    display: 'chord', note: null, level: -100, gate: 0.001,
+    quiet: true, muteUntil: 0, display: 'chord', note: null, gate: 0.001, tlEnd: 0,
   };
   const EXAMPLE = [0.06, 0.03, 0.86, 0.04, 0.1, 0.03, 0.08, 1, 0.03, 0.12, 0.03, 0.72];
   EXAMPLE.forEach((v, i) => { S.chroma[i] = v; S.draw[i] = v; });
@@ -623,7 +898,7 @@ if (typeof module !== 'undefined') module.exports = { HCFG, MATCH, TUNING, QUALI
       b.innerHTML = diagramSVG(v, root, q) + `<span class="cap"><span class="fam">${v.fam || 'Alternate'}</span><span class="pos">${pos}</span></span>`;
       b.addEventListener('click', () => {
         ensureCtx();
-        strum(v.frets, out, ctx.currentTime + 0.03, 1, 1);
+        strum(v.frets, out, ctx.currentTime + 0.03, 1, 1, tapVoices);
         S.muteUntil = performance.now() + 2600;
         b.classList.add('playing');
         setTimeout(() => b.classList.remove('playing'), 900);
@@ -633,17 +908,22 @@ if (typeof module !== 'undefined') module.exports = { HCFG, MATCH, TUNING, QUALI
   }
 
   // ---------- Audio ----------
-  let ctx = null, analyser, out, freqBuf, timeBuf, micStream = null, micSrc = null, fileSrc = null, demoBus = null, demoTimer = 0, wakeLock = null;
-  const ksCache = new Map();
+  let ctx = null, analyser, analyserS, inBus, out, freqBuf, freqBufS, timeBuf, micStream = null, micSrc = null, fileSrc = null, demoBus = null, demoTimer = 0, wakeLock = null;
+  const ksCache = new Map(), tapVoices = new Array(6).fill(null);
+  const L = new Listener();
   function ensureCtx() {
     if (!ctx) {
       const AC = window.AudioContext || window.webkitAudioContext;
       ctx = new AC();
-      analyser = ctx.createAnalyser();
-      analyser.fftSize = 16384;
-      analyser.smoothingTimeConstant = 0;
+      analyser = ctx.createAnalyser();               // long window: pitch detail
+      analyser.fftSize = 16384; analyser.smoothingTimeConstant = 0;
       analyser.minDecibels = -130; analyser.maxDecibels = 0;
+      analyserS = ctx.createAnalyser();              // short window: strum onsets
+      analyserS.fftSize = 2048; analyserS.smoothingTimeConstant = 0;
+      analyserS.minDecibels = -130; analyserS.maxDecibels = 0;
+      inBus = ctx.createGain(); inBus.connect(analyser); inBus.connect(analyserS);
       freqBuf = new Float32Array(analyser.frequencyBinCount);
+      freqBufS = new Float32Array(analyserS.frequencyBinCount);
       timeBuf = new Float32Array(analyser.fftSize);
       out = ctx.createGain(); out.gain.value = 0.9; out.connect(ctx.destination);
     }
@@ -654,34 +934,40 @@ if (typeof module !== 'undefined') module.exports = { HCFG, MATCH, TUNING, QUALI
     const sr = ctx.sampleRate, f = 440 * Math.pow(2, (midi - 69) / 12);
     const P = Math.max(2, Math.round(sr / f - 0.5));
     const len = Math.floor(sr * 2.6);
-    const buf = ctx.createBuffer(1, len, sr), out = buf.getChannelData(0);
+    const buf = ctx.createBuffer(1, len, sr), o = buf.getChannelData(0);
     const ring = new Float32Array(P); let lp = 0;
     for (let i = 0; i < P; i++) { lp = lp * 0.55 + (Math.random() * 2 - 1) * 0.45; ring[i] = lp; }
     const d = Math.pow(0.001, 1 / (f * 2.4));
     let idx = 0;
     for (let n = 0; n < len; n++) {
       const nx = idx + 1 === P ? 0 : idx + 1;
-      out[n] = ring[idx];
+      o[n] = ring[idx];
       ring[idx] = 0.5 * (ring[idx] + ring[nx]) * d;
       idx = nx;
     }
-    for (let n = 0; n < 200; n++) out[len - 1 - n] *= n / 200;
+    for (let n = 0; n < 200; n++) o[len - 1 - n] *= n / 200;
     ksCache.set(midi, buf);
     return buf;
   }
-  function strum(frets, dest, t, dir = 1, g = 1) {
-    const idx = [0, 1, 2, 3, 4, 5].filter(i => frets[i] !== null);
-    if (dir < 0) idx.reverse();
+  // A strum: each string replaces whatever that string was still ringing, like a real guitar
+  function strum(frets, dest, t, dir = 1, g = 1, voices = null) {
+    let idx = [0, 1, 2, 3, 4, 5].filter(i => frets[i] !== null);
+    if (dir < 0) idx = idx.filter(i => i >= 2).reverse();
+    const damp = i => { const v = voices && voices[i]; if (!v) return; try { v.gain.gain.setTargetAtTime(0, t, 0.012); v.src.stop(t + 0.25); } catch (e) {} voices[i] = null; };
+    if (voices) for (let i = 0; i < 6; i++) if (frets[i] === null) damp(i);
     idx.forEach((i, n) => {
+      const at = t + n * (dir < 0 ? 0.012 : 0.016);
+      if (voices) { const v = voices[i]; if (v) { try { v.gain.gain.setTargetAtTime(0, at, 0.008); v.src.stop(at + 0.2); } catch (e) {} } }
       const src = ctx.createBufferSource();
       src.buffer = ksBuffer(TUNING[i] + frets[i]);
       const gn = ctx.createGain(); gn.gain.value = 0.2 * g;
       src.connect(gn); gn.connect(dest);
-      src.start(t + n * 0.022);
+      src.start(at);
+      if (voices) voices[i] = { src, gain: gn };
     });
   }
 
-  function setMode(m, detail) {
+  function setMode(m) {
     S.mode = m;
     const live = m === 'mic' || m === 'demo' || m === 'file';
     $('pill').classList.toggle('on', live);
@@ -707,6 +993,10 @@ if (typeof module !== 'undefined') module.exports = { HCFG, MATCH, TUNING, QUALI
     if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
     if (S.mode !== 'example') setMode('idle');
     $('levelBar').style.width = '0%'; $('level').classList.remove('hot'); $('pill').classList.remove('hot');
+  }
+  function beginListening() {
+    L.reset(); L.track.minBeats = minBeats;
+    S.tlEnd = performance.now() / 1000;
   }
   function keepAwake() {
     try { navigator.wakeLock?.request('screen').then(l => { wakeLock = l; }).catch(() => {}); } catch (e) {}
@@ -737,28 +1027,30 @@ if (typeof module !== 'undefined') module.exports = { HCFG, MATCH, TUNING, QUALI
     }
     if (ctx.state === 'suspended') await ctx.resume();
     micSrc = ctx.createMediaStreamSource(micStream);
-    micSrc.connect(analyser);
-    S.noise = 0.0005; S.cand = null;
+    micSrc.connect(inBus);
+    beginListening();
     setMode('mic'); keepAwake();
   }
 
-  const DEMO = [[0, 'maj'], [9, 'm'], [5, 'maj'], [7, 'maj'], [2, '7'], [4, 'm'], [0, 'maj7'], [4, 'maj'], [9, 'sus4'], [11, 'm']];
+  // Demo: 96 BPM, down / down-up / up-down-up strumming, chord changes on the bar and half bar
+  const DEMO_BPM = 96;
+  const PATTERN = [[0, 1, 1], [1, 1, 0.8], [1.5, -1, 0.55], [2.5, -1, 0.55], [3, 1, 0.8], [3.5, -1, 0.55]];
+  const DEMO = [[0, 'maj', 4], [9, 'm', 4], [5, 'maj', 4], [7, 'maj', 4], [0, 'maj', 2], [7, 'maj', 2], [9, 'm', 4], [2, '7', 4], [4, 'm', 8]];
   function startDemo() {
     stopAll(); ensureCtx(); notice(null);
     demoBus = ctx.createGain();
-    demoBus.connect(out); demoBus.connect(analyser);
-    S.noise = 0.0005; S.cand = null;
+    demoBus.connect(out); demoBus.connect(inBus);
+    beginListening();
     setMode('demo');
-    let i = 0;
+    const T = 60 / DEMO_BPM, voices = new Array(6).fill(null);
+    let ci = 0, nextT = ctx.currentTime + 0.15;
     const step = () => {
       if (!demoBus) return;
-      const [r, k] = DEMO[i % DEMO.length];
+      const [r, k, nb] = DEMO[ci % DEMO.length];
       const v = getVoicings(r, k, 4)[0];
-      const t = ctx.currentTime + 0.03;
-      strum(v.frets, demoBus, t, 1, 1);
-      strum(v.frets, demoBus, t + 1.3, -1, 0.65);
-      i++;
-      demoTimer = setTimeout(step, 2600);
+      for (let b = 0; b < nb; b += 4) for (const [off, dir, g] of PATTERN) if (b + off < nb) strum(v.frets, demoBus, nextT + (b + off) * T, dir, g, voices);
+      nextT += nb * T; ci++;
+      demoTimer = setTimeout(step, Math.max(0, (nextT - ctx.currentTime - 0.6) * 1000));
     };
     step();
   }
@@ -780,9 +1072,9 @@ if (typeof module !== 'undefined') module.exports = { HCFG, MATCH, TUNING, QUALI
       const buf = await decode(await f.arrayBuffer());
       fileSrc = ctx.createBufferSource();
       fileSrc.buffer = buf;
-      fileSrc.connect(analyser); fileSrc.connect(out);
+      fileSrc.connect(inBus); fileSrc.connect(out);
       fileSrc.onended = () => { fileSrc = null; if (S.mode === 'file') setMode('idle'); };
-      S.noise = 0.0005; S.cand = null;
+      beginListening();
       fileSrc.start();
       setMode('file');
     } catch (err) {
@@ -791,21 +1083,28 @@ if (typeof module !== 'undefined') module.exports = { HCFG, MATCH, TUNING, QUALI
     e.target.value = '';
   });
 
-  // ---------- Sensitivity ----------
+  // ---------- Settings ----------
   const SENS = {
     low:  { floor: 0.003,  mul: 2.6, prom: 32, min: 0.68 },
     mid:  { floor: 0.0012, mul: 1.9, prom: 26, min: 0.58 },
     high: { floor: 0.0004, mul: 1.4, prom: 20, min: 0.5 },
   };
-  let sens = 'high';
+  let sens = 'high', minBeats = 2;
   try { const v = localStorage.getItem('chordEarSens'); if (SENS[v]) sens = v; } catch (e) {}
+  try { const v = +localStorage.getItem('chordEarBeats'); if ([1, 2, 4].includes(v)) minBeats = v; } catch (e) {}
   function setSens(v) {
-    sens = v;
+    sens = v; L.track.min = SENS[v].min;
     document.querySelectorAll('.seg.sens button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.s === v)));
     try { localStorage.setItem('chordEarSens', v); } catch (e) {}
   }
+  function setBeats(v) {
+    minBeats = v; L.track.minBeats = v;
+    document.querySelectorAll('.seg.len button').forEach(b => b.setAttribute('aria-pressed', String(+b.dataset.b === v)));
+    try { localStorage.setItem('chordEarBeats', String(v)); } catch (e) {}
+  }
   document.querySelectorAll('.seg.sens button').forEach(b => b.addEventListener('click', () => setSens(b.dataset.s)));
-  setSens(sens);
+  document.querySelectorAll('.seg.len button').forEach(b => b.addEventListener('click', () => setBeats(+b.dataset.b)));
+  setSens(sens); setBeats(minBeats);
   const dbPct = v => Math.max(0, Math.min(100, (20 * Math.log10(v + 1e-9) + 72) / 62 * 100));
   let levelT = 0;
   function renderLevel(rms, hot) {
@@ -816,82 +1115,109 @@ if (typeof module !== 'undefined') module.exports = { HCFG, MATCH, TUNING, QUALI
   }
 
   // ---------- Analysis loop ----------
-  function analyze(dt, now) {
-    const P = SENS[sens];
+  function showSeg(seg, score) {
+    if (seg.kind === 'note') setNote(seg.note);
+    else setShown(seg.root, seg.q, score ?? seg.score);
+    S.score = score ?? seg.score;
+  }
+  function analyze(dt, nowMs) {
+    const now = nowMs / 1000;
     analyser.getFloatTimeDomainData(timeBuf);
     let ss = 0; const n0 = timeBuf.length - 4096;
     for (let i = n0; i < timeBuf.length; i++) ss += timeBuf[i] * timeBuf[i];
     const rms = Math.sqrt(ss / 4096);
-    S.noise = rms < S.noise ? S.noise * 0.8 + rms * 0.2 : S.noise * 0.9995 + rms * 0.0005;
-    S.gate = Math.max(P.floor, S.noise * P.mul);
     analyser.getFloatFrequencyData(freqBuf);
-    const binHz = ctx.sampleRate / analyser.fftSize;
-    const { peaks, maxDb } = findPeaks(freqBuf, binHz);
-    // How far the strongest partial stands above the average of the band: catches quiet but clear notes
-    let sum = 0, cnt = 0;
-    for (let k = Math.floor(70 / binHz), k1 = Math.ceil(1400 / binHz); k <= k1; k++) { if (freqBuf[k] > -200) { sum += freqBuf[k]; cnt++; } }
-    const prom = cnt ? maxDb - sum / cnt : 0;
-    const hot = (rms > S.gate || (prom > P.prom && rms > P.floor * 0.4)) && now >= S.muteUntil && peaks.length > 0;
-    const onset = hot && rms > S.prevRms * 1.7 + 0.0005;
-    S.prevRms = S.prevRms * 0.7 + rms * 0.3;
-    $('pill').classList.toggle('hot', hot);
-    renderLevel(rms, hot);
-    if (!hot) {
+    analyserS.getFloatFrequencyData(freqBufS);
+    const sr = ctx.sampleRate;
+    const longCenter = analyser.fftSize / sr / 2;
+    const r = L.frame(now, {
+      rms, dt, longDb: freqBuf, longBinHz: sr / analyser.fftSize, longCenter,
+      shortDb: freqBufS, shortBinHz: sr / analyserS.fftSize, shortCenter: analyserS.fftSize / sr / 2,
+      muted: nowMs < S.muteUntil,
+    }, SENS[sens]);
+    S.tlEnd = now - longCenter;
+    S.gate = L.gate; S.tune = L.tune; S.quiet = !r.hot;
+    $('pill').classList.toggle('hot', r.hot);
+    renderLevel(rms, r.hot);
+    // the wheel follows the sound live; the chord name follows the beat
+    if (r.hot && r.chroma) {
+      const a = r.onset !== null ? 0.6 : 1 - Math.exp(-dt / 0.12);
+      for (let i = 0; i < 12; i++) S.chroma[i] = S.chroma[i] * (1 - a) + r.chroma[i] * a;
+      const cm = Math.max(...S.chroma); if (cm > 0) for (let i = 0; i < 12; i++) S.chroma[i] /= cm;
+      if (r.bassPc !== null) S.bassPc = r.bassPc;
+    } else {
       const k = Math.exp(-dt / 0.9);
       for (let i = 0; i < 12; i++) S.chroma[i] *= k;
-      S.quiet = true; S.cand = null;
-      return;
     }
-    S.quiet = false;
-    const an = analyzePeaks(peaks, S.tune);
-    if (an.tuneEst !== null) {
-      let d = an.tuneEst - S.tune; if (d > 50) d -= 100; if (d < -50) d += 100;
-      S.tune += d * Math.min(1, dt * 0.6);
-      if (S.tune > 50) S.tune -= 100; if (S.tune < -50) S.tune += 100;
+    for (const ev of r.events) {
+      if (ev.type === 'change' || ev.type === 'relabel') { showSeg(ev.seg); if (ev.seg.kind === 'chord') { S.alts = L.track.lastRes.filter(x => x.score >= L.track.lastRes[0].score * 0.86); renderAlts(); } }
+      else if (ev.type === 'hold') S.score = ev.score;
     }
-    const mx = Math.max(...an.chroma); if (!(mx > 0)) return;
-    const a = onset ? 0.75 : 1 - Math.exp(-dt / 0.14);
-    for (let i = 0; i < 12; i++) S.chroma[i] = S.chroma[i] * (1 - a) + (an.chroma[i] / mx) * a;
-    const cm = Math.max(...S.chroma); if (cm > 0) for (let i = 0; i < 12; i++) S.chroma[i] /= cm;
-    if (an.bassPc !== null) S.bassPc = an.bassPc;
+  }
 
-    // One clear pitch class: show the note like a tuner
-    // Single note = every strong partial is a harmonic of the lowest one
-    const amax = Math.max(...peaks.map(p => p.a));
-    const sig = peaks.filter(p => p.a >= 0.2 * amax).sort((x, y) => x.f - y.f);
-    // Phone mics often lose the fundamental, so also try half and a third of the lowest partial (not below low E)
-    let f0 = sig[0].f, bestR = 0;
-    for (const d of [1, 2, 3]) {
-      const c = sig[0].f / d; if (c < 75) break;
-      let eH = 0, eAll = 0;
-      for (const p of sig) { const h = Math.round(p.f / c), e = p.a * p.a; eAll += e; if (h >= 1 && h <= 12 && Math.abs(1200 * Math.log2(p.f / (h * c))) < 30) eH += e; }
-      if (eH / eAll > bestR + 0.02) { bestR = eH / eAll; f0 = c; }
+  // ---------- Timeline ----------
+  const tl = $('tl'), tg = tl.getContext('2d');
+  const EXT = (() => {
+    const T = 60 / 96, s0 = 0.5, beats = [], onsets = [], segs = [];
+    for (let i = 0; i < 16; i++) { beats.push({ t: s0 + i * T, idx: i }); for (const [o] of PATTERN) if (i % 4 === 0) onsets.push(s0 + (i + o) * T); }
+    const lab = [[7, 'maj'], [0, 'maj'], [2, 'maj'], [7, 'maj']];
+    lab.forEach(([r, q], i) => segs.push({ kind: 'chord', root: r, q, s: s0 + i * 4 * T, e: s0 + (i + 1) * 4 * T }));
+    segs[3].e = s0 + 14.6 * T;
+    return { segs, beats, onsets, end: s0 + 14.6 * T, processedTo: s0 + 14 * T, isBar: i => i % 4 === 0 };
+  })();
+  function segLabel(seg) { return seg.kind === 'note' ? NOTE[seg.note.pc] + seg.note.oct : chordName(seg.root, seg.q); }
+  function drawTimeline() {
+    const W = tl.clientWidth, H = tl.clientHeight; if (!W) return;
+    const dpr = Math.min(3, window.devicePixelRatio || 1);
+    if (tl.width !== Math.round(W * dpr) || tl.height !== Math.round(H * dpr)) { tl.width = Math.round(W * dpr); tl.height = Math.round(H * dpr); }
+    tg.setTransform(dpr, 0, 0, dpr, 0, 0); tg.clearRect(0, 0, W, H);
+    const live = S.mode === 'mic' || S.mode === 'demo' || S.mode === 'file';
+    const src = S.mode === 'example' ? EXT : {
+      segs: L.track.segments, beats: L.track.beatLog, onsets: L.track.onsetLog,
+      end: S.tlEnd, processedTo: L.track.processedTo, isBar: i => L.track.isBar(i),
+    };
+    const span = W < 520 ? 8 : 12, t0 = src.end - span, X = t => (t - t0) / span * W;
+    const y0 = 16, y1 = H - 22;
+    tg.fillStyle = COL.track; tg.globalAlpha = 0.5; tg.fillRect(0, y0, W, y1 - y0); tg.globalAlpha = 1;
+    // not yet decided: the last beat or so
+    if (src.processedTo !== null && src.processedTo !== undefined && live) {
+      const xp = Math.max(0, X(src.processedTo));
+      tg.save(); tg.beginPath(); tg.rect(xp, y0, W - xp, y1 - y0); tg.clip();
+      tg.strokeStyle = COL.line; tg.lineWidth = 1;
+      for (let x = xp - 40; x < W + 40; x += 7) { tg.beginPath(); tg.moveTo(x, y1); tg.lineTo(x + (y1 - y0), y0); tg.stroke(); }
+      tg.restore();
     }
-    const single = bestR > 0.88;
-    let id, apply;
-    if (single) {
-      const m = midiOf(f0) - S.tune / 100, rm = Math.round(m), pc = mod12(rm);
-      const mr = midiOf(f0), rr = Math.round(mr);
-      const n = { pc, oct: Math.floor(rm / 12) - 1, hz: f0, cents: Math.round((mr - rr) * 100) };
-      id = 'n' + pc + ':' + n.oct;
-      apply = () => setNote(n);
-      if (S.display === 'note' && S.note && S.note.pc === pc && S.note.oct === n.oct) { setNote(n); S.cand = null; return; }
-      S.score = 1;
-    } else {
-      const res = matchChords(Array.from(S.chroma), an.bassPc);
-      if (!res.length) return;
-      const best = res[0];
-      S.alts = res.filter(r => r.score >= best.score * 0.86);
-      if (S.display === 'chord' && S.shown && best.root === S.shown.root && best.q === S.shown.q) { S.score = best.score; S.cand = null; renderAlts(); return; }
-      if (best.score < P.min) { renderAlts(); return; }
-      id = best.root + ':' + best.q;
-      apply = () => { setShown(best.root, best.q, best.score); renderAlts(); };
-      if (S.display === 'chord' && S.shown) { const cur = res.find(r => r.root === S.shown.root && r.q === S.shown.q); if (cur) S.score = cur.score; }
-      S._best = best.score;
+    // chord segments
+    tg.font = `700 19px 'Big Shoulders Display', 'Noto Music', sans-serif`; tg.textBaseline = 'middle';
+    const segs = src.segs;
+    segs.forEach((seg, i) => {
+      const isCur = i === segs.length - 1;
+      const e = isCur ? (live ? src.end : seg.e) : seg.e;
+      const xa = X(seg.s), xb = X(e);
+      if (xb < 0 || xa > W) return;
+      tg.fillStyle = isCur ? COL.accent : COL.ink; tg.globalAlpha = isCur ? 0.16 : 0.07;
+      tg.fillRect(xa, y0, Math.max(0, xb - xa), y1 - y0); tg.globalAlpha = 1;
+      tg.fillStyle = seg.kind === 'note' ? COL.muted : COL.accent;
+      tg.fillRect(xa, y0, 2, y1 - y0);
+      const name = segLabel(seg);
+      tg.save(); tg.beginPath(); tg.rect(xa + 2, y0, Math.max(0, xb - xa - 3), y1 - y0); tg.clip();
+      tg.fillStyle = seg.kind === 'note' ? COL.muted : COL.ink;
+      tg.fillText(name, Math.max(xa + 7, 4), (y0 + y1) / 2 + 1);
+      tg.restore();
+    });
+    // beats and bar lines
+    for (const b of src.beats) {
+      const x = X(b.t); if (x < -2 || x > W + 2) continue;
+      if (src.isBar(b.idx)) { tg.fillStyle = COL.ink; tg.globalAlpha = 0.55; tg.fillRect(x - 0.75, 4, 1.5, H - 12); tg.globalAlpha = 1; }
+      else { tg.fillStyle = COL.muted; tg.fillRect(x - 0.5, y1 + 2, 1, 7); }
     }
-    if (S.cand === id) S.candT += dt; else { S.cand = id; S.candT = dt; }
-    const need = (S._best || 0) > 0.82 || id[0] === 'n' ? 0.12 : 0.24;
-    if (S.candT >= need) { apply(); S.cand = null; }
+    // strums
+    tg.fillStyle = COL.muted;
+    for (const t of src.onsets) { const x = X(t); if (x < 0 || x > W) continue; tg.beginPath(); tg.arc(x, H - 5, 2, 0, Math.PI * 2); tg.fill(); }
+    // tempo readout
+    const bpmEl = $('bpm');
+    const txt = S.mode === 'example' ? '96 BPM' : L.rhythm.locked ? `${Math.round(L.rhythm.bpm())} BPM` : live ? 'finding the beat…' : '–';
+    if (bpmEl.textContent !== txt) bpmEl.textContent = txt;
   }
 
   // ---------- Wheel ----------
@@ -949,6 +1275,7 @@ if (typeof module !== 'undefined') module.exports = { HCFG, MATCH, TUNING, QUALI
     if (live && analyser && !S.hold) analyze(dt, now);
     else if (!live && S.mode !== 'example') { const k = Math.exp(-dt / 1.2); for (let i = 0; i < 12; i++) S.chroma[i] *= k; }
     drawWheel(dt);
+    drawTimeline();
     renderMeters(false);
     requestAnimationFrame(loop);
   }
