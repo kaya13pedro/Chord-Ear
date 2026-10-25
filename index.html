@@ -67,6 +67,8 @@ body { background: var(--bg); color: var(--ink); font-family: var(--font-body); 
 .cname .sfx { font-size: 0.56em; font-weight: 700; color: var(--accent); margin-left: 0.03em; }
 .cname .acc { font-family: 'Noto Music', var(--font-body); font-weight: 400; font-size: 0.62em; vertical-align: 0.3em; margin-left: 0.02em; }
 .cname.quiet { opacity: 0.5; }
+.chear { font-family: var(--font-mono); font-size: 3.4cqi; color: var(--muted); min-height: 1.3em; margin-top: 1cqi; }
+.chear b { color: var(--accent); font-weight: 500; }
 .cqual { font-size: 4.3cqi; color: var(--muted); }
 .cnotes { font-family: var(--font-mono); font-size: 3.9cqi; letter-spacing: 0.08em; color: var(--ink); }
 
@@ -180,6 +182,7 @@ body { background: var(--bg); color: var(--ink); font-family: var(--font-body); 
           <div class="cname" id="cname" aria-live="polite"></div>
           <div class="cqual" id="cqual"></div>
           <div class="cnotes" id="cnotes"></div>
+          <div class="chear" id="chear" aria-hidden="true"></div>
         </div>
       </div>
 
@@ -529,7 +532,7 @@ function shapesInContext(root, qk, planned, prevV, nextV, max = 4) {
 
 // ---------- Analysis ----------
 const HARM = [[2, 0.8], [3, 0.6], [4, 0.8], [5, 0.25], [6, 0.6], [7, 0.25], [8, 0.8], [2.5, 0.6], [3.5, 0.5]];
-const HCFG = { h3: 0.6 };
+const HCFG = { h3: 0.45, h5: 0.25 };
 
 function findPeaks(db, binHz, fMin = 70, fMax = 1400) {
   const k0 = Math.max(2, Math.floor(fMin / binHz)), k1 = Math.min(db.length - 2, Math.ceil(fMax / binHz));
@@ -555,6 +558,7 @@ function midiOf(f) { return 69 + 12 * Math.log2(f / 440); }
 
 // Lowest note of the chord. Phone and tablet mics barely pick up the low E–G range, so the
 // bass is judged by its overtones too: a low G shows up as G3, D4, G4, B4 even when 98 Hz is gone.
+const BASS = { real: 0.15, h3: 0.06, strong: 0.3, over: 0 };
 function findBass(ps, amax, tuneCents) {
   const near = (f) => { let best = 0; for (const p of ps) { if (p.f > f * 1.03) break; if (Math.abs(1200 * Math.log2(p.f / f)) < 30 && p.a > best) best = p.a; } return best / amax; };
   const cands = [];
@@ -567,13 +571,20 @@ function findBass(ps, amax, tuneCents) {
   for (const c of cands) {
     const h = [0, 1, 2, 3, 4, 5, 6].map(k => k ? near(c * k) : 0);
     const sal = h[1] + 0.8 * h[2] + 0.7 * h[3] + 0.5 * h[4] + 0.45 * h[5] + 0.3 * h[6];
-    const odd = h[3] > 0.06 || h[5] > 0.06;
-    const ok = h[1] >= 0.15 || (h[2] > 0.08 && odd && [h[2], h[3], h[4], h[5], h[6]].filter(x => x > 0.06).length >= 3);
-    if (ok) scored.push({ c, sal });
+    const real = h[1] >= BASS.real;
+    // a missing fundamental needs its octave and twelfth (3rd harmonic) plus one more overtone
+    const virt = !real && h[2] > 0.08 && h[3] > BASS.h3 && [h[4], h[5], h[6]].some(x => x > 0.06);
+    if (real || virt) scored.push({ c, sal, real, h1: h[1] });
   }
   if (!scored.length) return null;
   const top = Math.max(...scored.map(x => x.sal));
-  for (const x of scored.sort((a, b) => a.c - b.c)) if (x.sal >= 0.45 * top) { best = x.c; break; }
+  scored.sort((a, b) => a.c - b.c);
+  // a clearly sounding low note wins over a guessed one below it
+  const firstReal = scored.find(x => x.real && x.h1 >= BASS.strong && x.sal >= 0.3 * top);
+  for (const x of scored) {
+    if (firstReal && x.c < firstReal.c * 0.97 && !x.real && x.sal < BASS.over * firstReal.sal) continue;
+    if (x.sal >= 0.45 * top) { best = x.c; break; }
+  }
   return best === null ? null : mod12(Math.round(midiOf(best) - tuneCents / 100));
 }
 
@@ -590,7 +601,7 @@ function analyzePeaks(peaks, tuneCents) {
     for (let i = 0; i < j; i++) {
       const pi = ps[i]; if (pi.a < 0.1 * pj.a) continue;
       const r = pj.f / pi.f;
-      for (const [n, fac0] of HARM) if (Math.abs(1200 * Math.log2(r / n)) < 22) { const fac = (n === 3 || n === 6) ? HCFG.h3 : fac0; if (fac < s) s = fac; }
+      for (const [n, fac0] of HARM) if (Math.abs(1200 * Math.log2(r / n)) < 22) { const fac = (n === 3 || n === 6) ? HCFG.h3 : (n === 5 || n === 2.5) ? HCFG.h5 : fac0; if (fac < s) s = fac; }
     }
     const m = midiOf(pj.f) - tuneCents / 100;
     const rm = Math.round(m), dev = m - rm;
@@ -604,17 +615,33 @@ function analyzePeaks(peaks, tuneCents) {
   return { chroma, tuneEst, bassPc };
 }
 
-const MATCH = { exp: 1.0, floor: 0.04, ext: 1.03, bassYes: 1.08, bassNo: 0.93 };
+const MATCH = { exp: 1.0, floor: 0.04, ext: 1.03, bassYes: 1.08, bassNo: 0.93, a3: 0, a5: 0 };
 function prepChroma(chroma) {
   const max = Math.max(...chroma); if (!(max > 0)) return null;
   const v = chroma.map(c => Math.max(0, Math.pow(c / max, MATCH.exp) - MATCH.floor));
   const vn = Math.sqrt(v.reduce((s, x) => s + x * x, 0)); if (!vn) return null;
   return { v, vn };
 }
+// Templates include each chord tone's own overtones (the 3rd harmonic sounds a fifth higher,
+// the 5th a major third higher), so a C chord's ringing G, B and D are expected, not read as a G chord.
+const _tpl = new Map();
+function template(r, q) {
+  const key = r + ':' + q.k + ':' + MATCH.a3 + ':' + MATCH.a5;
+  let t = _tpl.get(key);
+  if (!t) {
+    t = new Array(12).fill(0);
+    for (const [s] of q.iv) { const pc = (r + s) % 12; t[pc] += 1; t[(pc + 7) % 12] += MATCH.a3; t[(pc + 4) % 12] += MATCH.a5; }
+    const n = Math.sqrt(t.reduce((a, x) => a + x * x, 0));
+    t = { v: t.map(x => x / n) };
+    _tpl.set(key, t);
+  }
+  return t;
+}
 function scoreWith(pv, bassPc, r, q) {
-  let dot = 0; const tones = new Set();
-  for (const [s] of q.iv) { const pc = (r + s) % 12; tones.add(pc); dot += pv.v[pc]; }
-  let score = dot / (pv.vn * Math.sqrt(q.iv.length)) * (q.prior === 1 ? 1 : Math.min(1, q.prior * MATCH.ext));
+  const tones = new Set(q.iv.map(([s]) => (r + s) % 12));
+  const T = template(r, q).v;
+  let dot = 0; for (let i = 0; i < 12; i++) dot += pv.v[i] * T[i];
+  let score = dot / pv.vn * (q.prior === 1 ? 1 : Math.min(1, q.prior * MATCH.ext));
   if (bassPc !== null && bassPc !== undefined) score *= bassPc === r ? MATCH.bassYes : tones.has(bassPc) ? 1.0 : MATCH.bassNo;
   return score;
 }
@@ -806,7 +833,7 @@ class ChordTracker {
     if (this.cand && this.cand.id === obj.id && this.cand.lastIdx === idx - 1) { this.cand.n++; this.cand.adv += adv; this.cand.lastIdx = idx; this.cand.obj = obj; }
     else this.cand = { id: obj.id, obj, n: 1, adv, sIdx: idx, s: beat.s, lastIdx: idx };
     const g = this.minBeats, off = this.cand.sIdx - this.lastChangeIdx, mean = this.cand.adv / this.cand.n;
-    let need = off < g ? 3 : off % g === 0 ? (mean > 0.12 ? 1 : 2) : 2;
+    let need = off < g ? 3 : off % g === 0 ? (mean > 0.08 ? 1 : 2) : 2;
     if (obj.kind === 'note' && cur.kind === 'chord') need = Math.max(need, 2);
     cur.e = beat.e;
     if (this.cand.n >= need) {
@@ -879,7 +906,7 @@ class Listener {
   }
 }
 
-if (typeof module !== 'undefined') module.exports = { voicingPool, shapeCost, moveCost, planFingering, shapesInContext, HCFG, MATCH, TUNING, QUALITIES, QMAP, chordName, chordTones, getVoicings, analyzeShape, shapeFits, findPeaks, analyzePeaks, matchChords, scoreChord, detectSingle, Rhythm, ChordTracker, Listener, mod12, midiOf };
+if (typeof module !== 'undefined') module.exports = { BASS, voicingPool, shapeCost, moveCost, planFingering, shapesInContext, HCFG, MATCH, TUNING, QUALITIES, QMAP, chordName, chordTones, getVoicings, analyzeShape, shapeFits, findPeaks, analyzePeaks, matchChords, scoreChord, detectSingle, Rhythm, ChordTracker, Listener, mod12, midiOf };
 
 </script>
 <script>
@@ -1165,6 +1192,7 @@ if (typeof module !== 'undefined') module.exports = { voicingPool, shapeCost, mo
     if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
     if (S.mode !== 'example') setMode('idle');
     $('levelBar').style.width = '0%'; $('level').classList.remove('hot'); $('pill').classList.remove('hot');
+    $('chear').innerHTML = '';
   }
   function beginListening() {
     L.reset(); L.track.minBeats = minBeats;
@@ -1321,6 +1349,16 @@ if (typeof module !== 'undefined') module.exports = { voicingPool, shapeCost, mo
     } else {
       const k = Math.exp(-dt / 0.9);
       for (let i = 0; i < 12; i++) S.chroma[i] *= k;
+    }
+    // what it hears right now, before the beat confirms a change
+    if (nowMs - (S.hearT || 0) > 150) {
+      S.hearT = nowMs;
+      let txt = '';
+      if (r.hot && S.display === 'chord' && S.shown) {
+        const live = matchChords(Array.from(S.chroma), S.bassPc)[0];
+        if (live && live.score > 0.62 && !(live.root === S.shown.root && live.q === S.shown.q)) txt = `hearing <b>${accWrap(chordName(live.root, live.q))}</b>…`;
+      }
+      const el = $('chear'); if (el.innerHTML !== txt) el.innerHTML = txt;
     }
     for (const ev of r.events) {
       if (ev.type === 'change' || ev.type === 'relabel') { showSeg(ev.seg); if (ev.seg.kind === 'chord') { S.alts = L.track.lastRes.filter(x => x.score >= L.track.lastRes[0].score * 0.86); renderAlts(); } }
