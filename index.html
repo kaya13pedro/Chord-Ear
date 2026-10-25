@@ -123,9 +123,10 @@ body { background: var(--bg); color: var(--ink); font-family: var(--font-body); 
 .diagrams { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 @media (min-width: 560px) { .diagrams { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
 @media (min-width: 820px) and (max-width: 1000px) { .diagrams { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-.shape { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 12px 8px 12px; display: grid; gap: 6px; justify-items: center; cursor: pointer; color: var(--ink); font: inherit; min-width: 0; }
+.shape { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 10px 8px 12px; align-content: start; display: grid; gap: 6px; justify-items: center; cursor: pointer; color: var(--ink); font: inherit; min-width: 0; }
 .shape:hover { border-color: var(--muted); }
-.shape.playing { border-color: var(--accent); }
+.shape.playing, .mini.playing { border-color: var(--accent); }
+.shape.best { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); }
 .shape svg { width: 100%; max-width: 168px; height: auto; display: block; }
 .shape .cap { display: grid; gap: 1px; text-align: center; }
 .shape .fam { font-weight: 600; font-size: 14px; }
@@ -144,6 +145,20 @@ body { background: var(--bg); color: var(--ink); font-family: var(--font-body); 
 .dg .sl { fill: var(--muted); font: 500 7px var(--font-mono); }
 .dg .sl.root { fill: var(--accent); }
 .hint { margin: 0; color: var(--muted); font-size: 13px; }
+.fitnote { margin: -4px 0 0; font-size: 14px; color: var(--muted); }
+.fitnote b { color: var(--ink); font-weight: 600; }
+.badge { font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent-ink); background: var(--accent); padding: 3px 7px 2px; border-radius: 6px; justify-self: center; }
+.badge.ghost { background: transparent; color: var(--muted); border: 1px solid var(--line); }
+.prog { display: grid; gap: 8px; margin-top: 4px; }
+.prog h3 { margin: 0; font-family: var(--font-display); font-weight: 800; font-size: 20px; letter-spacing: 0.03em; text-transform: uppercase; }
+.strip { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; scrollbar-width: thin; }
+.mini { flex: 0 0 auto; width: 104px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 8px 6px; display: grid; gap: 2px; justify-items: center; cursor: pointer; color: var(--ink); font: inherit; }
+.mini .nm { font-family: var(--font-display); font-weight: 700; font-size: 20px; line-height: 1; }
+.mini .nm .acc { font-family: 'Noto Music', var(--font-body); font-weight: 400; font-size: 0.7em; vertical-align: 0.25em; }
+.mini svg { width: 92px; height: auto; display: block; }
+.mini .pos { font-family: var(--font-mono); font-size: 10.5px; color: var(--muted); }
+.mini.now { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.mini.next { border-style: dashed; opacity: 0.75; }
 .foot { color: var(--muted); font-size: 13px; max-width: 68ch; margin: 0; }
 @media (prefers-reduced-motion: reduce) { .bar i, .cname, .pill .dot { transition: none; } }
 </style>
@@ -215,8 +230,14 @@ body { background: var(--bg); color: var(--ink); font-family: var(--font-body); 
           <button id="segNote" aria-pressed="false">Notes</button>
         </div>
       </div>
+      <p class="fitnote" id="fitnote"></p>
       <div class="diagrams" id="diagrams"></div>
       <p class="hint">Tap a shape to hear it. Orange dots are the root.</p>
+      <div class="prog" id="prog" hidden>
+        <h3>Your progression</h3>
+        <p class="hint" id="progNote">One fingering per chord, picked so the hand moves as little as possible.</p>
+        <div class="strip" id="strip"></div>
+      </div>
       <p class="foot">After a few strums Chord Ear finds the beat and only changes chord on a beat, once the new chord has lasted at least the length you set under Rhythm. Bar lines start from the first chord change. Without a steady beat it waits for about a second of the new chord.</p>
       <p class="foot">Chords that share the same notes, like Am7 and C6 or Asus4 and Dsus2, are told apart by the lowest note; the other reading shows under “Could also be”.</p>
     </section>
@@ -422,6 +443,90 @@ function getVoicings(rootPc, qk, max = 4) {
   return picked;
 }
 
+// ---------- Choosing fingerings for a whole progression ----------
+const _pool = new Map();
+function voicingPool(rootPc, qk) {
+  const key = mod12(rootPc) + ':' + qk;
+  if (_pool.has(key)) return _pool.get(key);
+  const q = QMAP[qk], out = [], seen = new Set();
+  const add = v => { const k = v.frets.join(','); if (seen.has(k)) return; seen.add(k); v.cost = shapeCost(v); out.push(v); };
+  for (const [pc, k, fr] of OPEN) if (pc === mod12(rootPc) && k === qk) { const a = shapeFits(fr, rootPc, q, false); if (a) add({ frets: fr, a, fam: 'Open' }); }
+  for (const rs of [0, 1, 2]) {
+    const off = MOVE[rs].s[qk]; if (!off) continue;
+    const r0 = mod12(rootPc - TUNING[rs]);
+    for (const r of [r0, r0 + 12]) {
+      const fr = off.map(o => o === null ? null : r + o);
+      if (fr.some(f => f !== null && (f < 0 || f > 15))) continue;
+      const a = shapeFits(fr, rootPc, q, false);
+      if (a) { add({ frets: fr, a, fam: r === 0 && a.opens ? 'Open' : MOVE[rs].fam }); if (r === r0) break; }
+    }
+  }
+  // unusual computer-found shapes only when the standard ones run short
+  if (out.length < 3) generateShapes(rootPc, q).slice(0, 6 - out.length).forEach(v => add({ frets: v.frets, a: v.a, fam: null }));
+  _pool.set(key, out);
+  return out;
+}
+// How hard a shape is to hold on its own
+function shapeCost(v) {
+  const a = v.a; let c = 0;
+  if (a.barre) {
+    const w = a.barre.to - a.barre.from + 1;
+    c += w >= 5 ? 1.2 : w >= 3 ? 0.7 : 0.3;
+    if (a.barre.fret === 1 && w >= 5) c += 0.5;
+  }
+  c += Math.max(0, a.fingers - 2) * 0.3 + Math.max(0, a.span - 2) * 0.6 + a.innerMutes * 0.5;
+  if (a.sounded.length < 4) c += 0.5; else if (a.sounded.length < 5) c += 0.15;
+  if (a.pos > 7) c += (a.pos - 7) * 0.12;
+  if (!v.fam) c += 1.8;                         // works, but not a standard shape
+  if (a.opens && a.minF <= 3 && !a.barre) c -= 0.3;
+  return c;
+}
+function handPos(v) { const f = v.frets.filter(x => x > 0); return f.length ? f.reduce((s, x) => s + x, 0) / f.length : 1; }
+// How hard it is to get from one shape to the next
+function moveCost(u, v) {
+  let c = 0.45 * Math.abs(handPos(u) - handPos(v)), same = 0, moved = 0;
+  for (let i = 0; i < 6; i++) { const a = u.frets[i], b = v.frets[i]; if (a > 0 && b > 0 && a === b) same++; else if (b > 0) moved++; }
+  c += moved * 0.12 - same * 0.25;
+  if (u.fam && u.fam === v.fam && u.fam !== 'Open' && u.a.lo === v.a.lo) c -= 0.2;  // same shape slid along the neck
+  // a barre that is already down only has to slide; forming it is the hard part
+  if (u.a.barre && v.a.barre && Math.abs((u.a.barre.to - u.a.barre.from) - (v.a.barre.to - v.a.barre.from)) <= 1) c -= 0.8;
+  return Math.max(-0.8, c);
+}
+// chords: [{root, q}] in playing order; future chords count a bit less. Returns the chosen voicing for each.
+function planFingering(chords, futureFrom = chords.length) {
+  if (!chords.length) return [];
+  const pools = chords.map(c => voicingPool(c.root, c.q));
+  let prev = pools[0].map(v => ({ cost: v.cost, back: -1 }));
+  const backs = [prev];
+  for (let j = 1; j < chords.length; j++) {
+    const w = j >= futureFrom ? 0.7 : 1;
+    const cur = pools[j].map(v => {
+      let best = Infinity, bi = 0;
+      pools[j - 1].forEach((u, i) => { const c = prev[i].cost + w * moveCost(u, v); if (c < best) { best = c; bi = i; } });
+      return { cost: best + w * v.cost, back: bi };
+    });
+    backs.push(cur); prev = cur;
+  }
+  let bi = 0; prev.forEach((p, i) => { if (p.cost < prev[bi].cost) bi = i; });
+  const pick = new Array(chords.length);
+  for (let j = chords.length - 1; j >= 0; j--) { pick[j] = pools[j][bi]; bi = backs[j][bi].back; }
+  return pick;
+}
+// Shapes to show for one chord in context: the planned one first, then good alternatives at other positions
+function shapesInContext(root, qk, planned, prevV, nextV, max = 4) {
+  const pool = voicingPool(root, qk);
+  const score = v => v.cost + (prevV ? moveCost(prevV, v) : 0) + (nextV ? 0.7 * moveCost(v, nextV) : 0);
+  const ranked = pool.slice().sort((x, y) => score(x) - score(y));
+  const out = planned ? [planned] : [];
+  for (const v of ranked) {
+    if (out.length >= max) break;
+    if (out.some(p => p.frets.join(',') === v.frets.join(','))) continue;
+    if (out.some(p => Math.abs(p.a.pos - v.a.pos) < 2 && p.a.lo === v.a.lo)) continue;
+    out.push(v);
+  }
+  return out;
+}
+
 // ---------- Analysis ----------
 const HARM = [[2, 0.8], [3, 0.6], [4, 0.8], [5, 0.25], [6, 0.6], [7, 0.25], [8, 0.8], [2.5, 0.6], [3.5, 0.5]];
 const HCFG = { h3: 0.6 };
@@ -448,6 +553,30 @@ function findPeaks(db, binHz, fMin = 70, fMax = 1400) {
 
 function midiOf(f) { return 69 + 12 * Math.log2(f / 440); }
 
+// Lowest note of the chord. Phone and tablet mics barely pick up the low E–G range, so the
+// bass is judged by its overtones too: a low G shows up as G3, D4, G4, B4 even when 98 Hz is gone.
+function findBass(ps, amax, tuneCents) {
+  const near = (f) => { let best = 0; for (const p of ps) { if (p.f > f * 1.03) break; if (Math.abs(1200 * Math.log2(p.f / f)) < 30 && p.a > best) best = p.a; } return best / amax; };
+  const cands = [];
+  for (const p of ps) {
+    if (p.f > 420) break;
+    for (const d of [1, 2, 3]) { const c = p.f / d; if (c >= 78 && c <= 360) cands.push(c); }
+  }
+  let best = null;
+  const scored = [];
+  for (const c of cands) {
+    const h = [0, 1, 2, 3, 4, 5, 6].map(k => k ? near(c * k) : 0);
+    const sal = h[1] + 0.8 * h[2] + 0.7 * h[3] + 0.5 * h[4] + 0.45 * h[5] + 0.3 * h[6];
+    const odd = h[3] > 0.06 || h[5] > 0.06;
+    const ok = h[1] >= 0.15 || (h[2] > 0.08 && odd && [h[2], h[3], h[4], h[5], h[6]].filter(x => x > 0.06).length >= 3);
+    if (ok) scored.push({ c, sal });
+  }
+  if (!scored.length) return null;
+  const top = Math.max(...scored.map(x => x.sal));
+  for (const x of scored.sort((a, b) => a.c - b.c)) if (x.sal >= 0.45 * top) { best = x.c; break; }
+  return best === null ? null : mod12(Math.round(midiOf(best) - tuneCents / 100));
+}
+
 // Returns {chroma[12], tune (cents estimate), bassPc}
 function analyzePeaks(peaks, tuneCents) {
   const chroma = new Array(12).fill(0);
@@ -471,8 +600,7 @@ function analyzePeaks(peaks, tuneCents) {
     if (pj.f < 500) { const raw = midiOf(pj.f); const d = raw - Math.round(raw); const ww = Math.sqrt(pj.a / amax); sx += ww * Math.cos(2 * Math.PI * d); sy += ww * Math.sin(2 * Math.PI * d); }
   }
   const tuneEst = (sx || sy) ? Math.atan2(sy, sx) / (2 * Math.PI) * 100 : null;
-  let bassPc = null;
-  for (const p of ps) { if (p.f > 350) break; if (p.a >= 0.18 * amax) { bassPc = mod12(Math.round(midiOf(p.f) - tuneCents / 100)); break; } }
+  const bassPc = findBass(ps, amax, tuneCents);
   return { chroma, tuneEst, bassPc };
 }
 
@@ -751,7 +879,7 @@ class Listener {
   }
 }
 
-if (typeof module !== 'undefined') module.exports = { HCFG, MATCH, TUNING, QUALITIES, QMAP, chordName, chordTones, getVoicings, analyzeShape, shapeFits, findPeaks, analyzePeaks, matchChords, scoreChord, detectSingle, Rhythm, ChordTracker, Listener, mod12, midiOf };
+if (typeof module !== 'undefined') module.exports = { voicingPool, shapeCost, moveCost, planFingering, shapesInContext, HCFG, MATCH, TUNING, QUALITIES, QMAP, chordName, chordTones, getVoicings, analyzeShape, shapeFits, findPeaks, analyzePeaks, matchChords, scoreChord, detectSingle, Rhythm, ChordTracker, Listener, mod12, midiOf };
 
 </script>
 <script>
@@ -885,26 +1013,70 @@ if (typeof module !== 'undefined') module.exports = { HCFG, MATCH, TUNING, QUALI
     return o + '</svg>';
   }
 
+  function playShape(v, el) {
+    ensureCtx();
+    strum(v.frets, out, ctx.currentTime + 0.03, 1, 1, tapVoices);
+    S.muteUntil = performance.now() + 2600;
+    el.classList.add('playing');
+    setTimeout(() => el.classList.remove('playing'), 900);
+  }
+  const sameChord = (a, b) => a && b && mod12(a.root) === mod12(b.root) && a.q === b.q;
+  // The chords played so far, the one on display last, plus a guess at what comes next from the loop
+  function progressionContext() {
+    const segs = S.mode === 'example' ? EXT.segs : L.track.segments;
+    let seq = [];
+    for (const sg of segs) if (sg.kind === 'chord' && !sameChord(seq[seq.length - 1], sg)) seq.push({ root: sg.root, q: sg.q });
+    if (S.shown && !sameChord(seq[seq.length - 1], S.shown)) seq.push({ root: S.shown.root, q: S.shown.q });
+    seq = seq.slice(-8);
+    let future = [];
+    const cur = seq[seq.length - 1];
+    for (let j = seq.length - 2; j >= 0; j--) if (sameChord(seq[j], cur)) { future = seq.slice(j + 1, Math.min(j + 4, seq.length - 1)); break; }
+    return { seq, future };
+  }
+  const posText = v => v.a.pos === 0 ? 'open' : `fret ${v.a.pos}`;
   function renderDiagrams() {
     const box = $('diagrams');
     box.innerHTML = '';
     if (!S.shown) return;
     const { root, q } = S.shown;
-    const vs = getVoicings(root, q, 4);
-    vs.forEach(v => {
+    const { seq, future } = progressionContext();
+    const all = seq.concat(future);
+    const plan = planFingering(all, seq.length);
+    const k = seq.length - 1;
+    const chosen = plan[k], prevV = k > 0 ? plan[k - 1] : null, nextV = future.length ? plan[k + 1] : null;
+    const vs = shapesInContext(root, q, chosen, prevV, nextV, 4);
+    const nm = c => chordName(c.root, c.q);
+    let note;
+    if (prevV && nextV) note = `<b>Best fit</b> coming from ${nm(seq[k - 1])} and going to ${nm(future[0])}, the chord that followed last time.`;
+    else if (prevV) note = `<b>Best fit</b> coming from ${nm(seq[k - 1])}: the least hand movement.`;
+    else note = '<b>Easiest</b> shape first. Once you play more chords, the first shape is picked to suit the whole progression.';
+    $('fitnote').innerHTML = note;
+    vs.forEach((v, i) => {
       const b = document.createElement('button');
-      b.type = 'button'; b.className = 'shape';
-      const pos = v.a.pos === 0 ? 'open position' : `fret ${v.a.pos}`;
-      b.innerHTML = diagramSVG(v, root, q) + `<span class="cap"><span class="fam">${v.fam || 'Alternate'}</span><span class="pos">${pos}</span></span>`;
-      b.addEventListener('click', () => {
-        ensureCtx();
-        strum(v.frets, out, ctx.currentTime + 0.03, 1, 1, tapVoices);
-        S.muteUntil = performance.now() + 2600;
-        b.classList.add('playing');
-        setTimeout(() => b.classList.remove('playing'), 900);
-      });
+      b.type = 'button'; b.className = 'shape' + (i === 0 ? ' best' : '');
+      const badge = i === 0 ? `<span class="badge">${prevV ? 'Best fit' : 'Easiest'}</span>` : `<span class="badge ghost">${prevV ? (moveCost(prevV, v) < moveCost(prevV, vs[0]) ? 'Less moving' : 'Also good') : 'Also good'}</span>`;
+      b.innerHTML = badge + diagramSVG(v, root, q) + `<span class="cap"><span class="fam">${v.fam || 'Alternate'}</span><span class="pos">${posText(v) === 'open' ? 'open position' : posText(v)}</span></span>`;
+      b.addEventListener('click', () => playShape(v, b));
       box.appendChild(b);
     });
+    renderStrip(seq, future, plan);
+  }
+  function renderStrip(seq, future, plan) {
+    const wrap = $('prog'), strip = $('strip');
+    if (seq.length < 2) { wrap.hidden = true; return; }
+    wrap.hidden = false; strip.innerHTML = '';
+    const all = seq.concat(future);
+    all.forEach((c, i) => {
+      const v = plan[i]; if (!v) return;
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'mini' + (i === seq.length - 1 ? ' now' : '') + (i >= seq.length ? ' next' : '');
+      b.setAttribute('aria-label', `${chordName(c.root, c.q)}, ${posText(v)}${i >= seq.length ? ', likely next' : ''}`);
+      b.innerHTML = `<span class="nm">${accWrap(chordName(c.root, c.q))}</span>` + diagramSVG(v, c.root, c.q) + `<span class="pos">${i >= seq.length ? 'next? · ' : ''}${posText(v)}</span>`;
+      b.addEventListener('click', () => playShape(v, b));
+      strip.appendChild(b);
+    });
+    requestAnimationFrame(() => { strip.scrollLeft = strip.scrollWidth; });
   }
 
   // ---------- Audio ----------
@@ -1043,11 +1215,12 @@ if (typeof module !== 'undefined') module.exports = { HCFG, MATCH, TUNING, QUALI
     beginListening();
     setMode('demo');
     const T = 60 / DEMO_BPM, voices = new Array(6).fill(null);
+    const demoPlan = planFingering(DEMO.map(([r, k]) => ({ root: r, q: k })));
     let ci = 0, nextT = ctx.currentTime + 0.15;
     const step = () => {
       if (!demoBus) return;
       const [r, k, nb] = DEMO[ci % DEMO.length];
-      const v = getVoicings(r, k, 4)[0];
+      const v = demoPlan[ci % DEMO.length];
       for (let b = 0; b < nb; b += 4) for (const [off, dir, g] of PATTERN) if (b + off < nb) strum(v.frets, demoBus, nextT + (b + off) * T, dir, g, voices);
       nextT += nb * T; ci++;
       demoTimer = setTimeout(step, Math.max(0, (nextT - ctx.currentTime - 0.6) * 1000));
