@@ -193,7 +193,6 @@ body { background: var(--bg); color: var(--ink); font-family: var(--font-body); 
           <div class="cname" id="cname" aria-live="polite"></div>
           <div class="cqual" id="cqual"></div>
           <div class="cnotes" id="cnotes"></div>
-          <div class="chear" id="chear" aria-hidden="true"></div>
         </div>
       </div>
 
@@ -263,7 +262,7 @@ body { background: var(--bg); color: var(--ink); font-family: var(--font-body); 
         <p class="hint" style="margin-top:10px">Tap a shape or a chord to hear it. Orange dots are the root.</p>
       </section>
 
-      <p class="foot">Put the phone or iPad near the speaker. Chord Ear finds the beat from the drums and strums, then reads the harmony of the whole band (guitars, keys, bass) and only changes chord on a beat, once the new chord has lasted at least the length you set. It shows the harmony, so a guitar playing a different voicing still lines up with the chord names. Bars count from the first chord change and assume four beats per bar.</p>
+      <p class="foot">Put the phone or iPad near the speaker. The big chord name is read from exactly what the wheel shows: the notes sounding over the last fifth of a second, so it follows the music closely. The chord sheet is steadier. It finds the beat from the drums and strums and writes a chord on a beat only once it has lasted at least the length you set under Shortest chord. Both read the harmony of the whole band (guitars, keys, bass), so a guitar playing a different voicing still lines up with the names. Bars count from the first chord change and assume four beats per bar.</p>
     </div>
   </main>
 </div>
@@ -1021,6 +1020,36 @@ class ChordTracker {
   isBar(idx) { return this.anchorIdx !== null && (((idx - this.anchorIdx) % 4) + 4) % 4 === 0; }
 }
 
+// ---------- The chord on screen: read straight from what the wheel shows ----------
+// Smooths the note energies over about a third of a second and names the chord that fits them best.
+// A new chord takes over once it has fitted better for LIVE.lead seconds.
+const LIVE = { tau: 0.2, lead: 0.2, margin: 0.015, min: 0.55, bassShare: 0.45 };
+class LiveChord {
+  constructor() { this.vocab = null; this.reset(); }
+  reset() { this.c = new Float64Array(12); this.bh = new Float64Array(12); this.cur = null; this.cand = null; this.candT = 0; this.res = []; this.bass = null; }
+  update(dt, r) {
+    if (!(r.hot && r.chroma)) { const k = Math.exp(-dt / 1.5); for (let i = 0; i < 12; i++) this.c[i] *= k; this.cand = null; return null; }
+    const a = 1 - Math.exp(-dt / LIVE.tau);
+    let m = 0; for (let i = 0; i < 12; i++) { this.c[i] = this.c[i] * (1 - a) + r.chroma[i] * a; if (this.c[i] > m) m = this.c[i]; }
+    if (m > 0) for (let i = 0; i < 12; i++) this.c[i] /= m;
+    const kb = Math.exp(-dt / 0.6); let tot = 0, bm = 0, bi = 0;
+    for (let i = 0; i < 12; i++) { this.bh[i] *= kb; if (i === r.bassPc) this.bh[i] += dt; tot += this.bh[i]; if (this.bh[i] > bm) { bm = this.bh[i]; bi = i; } }
+    this.bass = tot > 0.1 && bm > LIVE.bassShare * tot ? bi : null;
+    const res = matchChords(Array.from(this.c), this.bass, 6, this.vocab);
+    this.res = res; if (!res.length) return null;
+    const best = res[0];
+    if (this.cur && best.root === this.cur.root && best.q === this.cur.q) { this.cur.score = best.score; this.cand = null; return null; }
+    const curScore = this.cur ? scoreChord(Array.from(this.c), this.bass, this.cur.root, this.cur.q) : 0;
+    if (best.score < LIVE.min || best.score - curScore < LIVE.margin) { this.cand = null; return null; }
+    const id = best.root + ':' + best.q;
+    if (this.cand === id) this.candT += dt; else { this.cand = id; this.candT = dt; }
+    if (this.candT < (this.cur ? LIVE.lead : LIVE.lead * 0.5)) return null;
+    this.cand = null;
+    this.cur = { root: best.root, q: best.q, score: best.score };
+    return { type: 'change', chord: this.cur };
+  }
+}
+
 // ---------- One analysis frame: level gate, onsets, chroma, tracking ----------
 class Listener {
   constructor() { this.rhythm = new Rhythm(); this.track = new ChordTracker(); this.reset(); }
@@ -1067,7 +1096,7 @@ class Listener {
   }
 }
 
-if (typeof module !== 'undefined') module.exports = { HMM, PEAK, VOCAB, BASS, voicingPool, shapeCost, moveCost, planFingering, shapesInContext, HCFG, MATCH, TUNING, QUALITIES, QMAP, chordName, chordTones, getVoicings, analyzeShape, shapeFits, findPeaks, analyzePeaks, matchChords, scoreChord, detectSingle, Rhythm, ChordTracker, Listener, mod12, midiOf };
+if (typeof module !== 'undefined') module.exports = { LIVE, LiveChord, HMM, PEAK, VOCAB, BASS, voicingPool, shapeCost, moveCost, planFingering, shapesInContext, HCFG, MATCH, TUNING, QUALITIES, QMAP, chordName, chordTones, getVoicings, analyzeShape, shapeFits, findPeaks, analyzePeaks, matchChords, scoreChord, detectSingle, Rhythm, ChordTracker, Listener, mod12, midiOf };
 
 </script>
 <script>
@@ -1309,7 +1338,7 @@ if (typeof module !== 'undefined') module.exports = { HMM, PEAK, VOCAB, BASS, vo
   // ---------- Audio ----------
   let ctx = null, analyser, analyserS, inBus, out, freqBuf, freqBufS, timeBuf, micStream = null, micSrc = null, fileSrc = null, demoBus = null, demoTimer = 0, wakeLock = null;
   const ksCache = new Map(), tapVoices = new Array(6).fill(null);
-  const L = new Listener();
+  const L = new Listener(), LC = new LiveChord();
   L.track.notes = false; L.track.useKey = false; PEAK.whiten = false;
   function ensureCtx() {
     if (!ctx) {
@@ -1393,10 +1422,11 @@ if (typeof module !== 'undefined') module.exports = { HMM, PEAK, VOCAB, BASS, vo
     if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
     if (S.mode !== 'example') setMode('idle');
     $('levelBar').style.width = '0%'; $('level').classList.remove('hot'); $('pill').classList.remove('hot');
-    $('chear').innerHTML = ''; S.hearing = '';
+    S.hearing = '';
   }
   function beginListening() {
     L.reset(); L.track.minBeats = minBeats; L.track.vocab = VOCAB[vocab];
+    LC.reset(); LC.vocab = VOCAB[vocab];
     S.hearing = ''; sheetSig = '';
   }
   function keepAwake() {
@@ -1540,7 +1570,7 @@ if (typeof module !== 'undefined') module.exports = { HMM, PEAK, VOCAB, BASS, vo
   const pressGroup = (sel, attr, val) => document.querySelectorAll(sel + ' button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset[attr] === String(val))));
   function setSens(v) { sens = v; L.track.min = SENS[v].min; pressGroup('.seg.sens', 's', v); try { localStorage.setItem('chordEarSens', v); } catch (e) {} }
   function setBeats(v) { minBeats = v; L.track.minBeats = v; pressGroup('.seg.len', 'b', v); try { localStorage.setItem('chordEarBeats', String(v)); } catch (e) {} }
-  function setVocab(v) { vocab = v; L.track.vocab = VOCAB[v]; pressGroup('.seg.voc', 'v', v); try { localStorage.setItem('chordEarVocab', v); } catch (e) {} }
+  function setVocab(v) { vocab = v; L.track.vocab = VOCAB[v]; LC.vocab = VOCAB[v]; pressGroup('.seg.voc', 'v', v); try { localStorage.setItem('chordEarVocab', v); } catch (e) {} }
   function setLabels(v) { S.labels = v; pressGroup('.seg.lbl', 'l', v); renderDiagrams(); renderSongChords(); }
   document.querySelectorAll('.seg.sens button').forEach(b => b.addEventListener('click', () => setSens(b.dataset.s)));
   document.querySelectorAll('.seg.len button').forEach(b => b.addEventListener('click', () => setBeats(+b.dataset.b)));
@@ -1574,35 +1604,18 @@ if (typeof module !== 'undefined') module.exports = { HMM, PEAK, VOCAB, BASS, vo
     S.gate = L.gate; S.tune = L.tune; S.quiet = !r.hot;
     $('pill').classList.toggle('hot', r.hot);
     renderLevel(rms, r.hot);
-    // the wheel follows the sound live; the chord name follows the beat
-    if (r.hot && r.chroma) {
-      const a = r.onset !== null ? 0.6 : 1 - Math.exp(-dt / 0.12);
-      for (let i = 0; i < 12; i++) S.chroma[i] = S.chroma[i] * (1 - a) + r.chroma[i] * a;
-      const cm = Math.max(...S.chroma); if (cm > 0) for (let i = 0; i < 12; i++) S.chroma[i] /= cm;
-      if (r.bassPc !== null) S.bassPc = r.bassPc;
-    } else {
-      const k = Math.exp(-dt / 0.9);
-      for (let i = 0; i < 12; i++) S.chroma[i] *= k;
+    // The center name and the wheel come from the same note energies, so they always agree.
+    // The chord sheet is written separately, on the beat.
+    const ch = LC.update(dt, r);
+    for (let i = 0; i < 12; i++) S.chroma[i] = LC.c[i];
+    if (LC.bass !== null) S.bassPc = LC.bass; else if (r.hot && r.bassPc !== null) S.bassPc = r.bassPc;
+    if (ch) setShown(ch.chord.root, ch.chord.q, ch.chord.score);
+    if (LC.res.length && nowMs - (S.altT || 0) > 400) {
+      S.altT = nowMs;
+      S.alts = LC.res.filter(x => x.score >= LC.res[0].score * 0.93);
+      renderAlts();
     }
-    if (nowMs - (S.hearT || 0) > 150) {
-      S.hearT = nowMs;
-      let txt = '', name = '';
-      if (r.hot && S.shown) {
-        const live = matchChords(Array.from(S.chroma), S.bassPc, 1, VOCAB[vocab])[0];
-        if (live && live.score > 0.62) { name = chordName(live.root, live.q); if (!(live.root === S.shown.root && live.q === S.shown.q)) txt = `hearing <b>${accWrap(name)}</b>…`; }
-      }
-      S.hearing = name;
-      const el = $('chear'); if (el.innerHTML !== txt) el.innerHTML = txt;
-    }
-    for (const ev of r.events) {
-      if (ev.type === 'change' || ev.type === 'relabel') {
-        if (ev.seg.kind === 'chord') {
-          setShown(ev.seg.root, ev.seg.q, ev.seg.score);
-          S.alts = L.track.lastRes.filter(x => x.score >= L.track.lastRes[0].score * 0.9);
-          renderAlts();
-        }
-      } else if (ev.type === 'hold') S.score = ev.score;
-    }
+    S.hearing = r.hot && LC.res.length ? chordName(LC.res[0].root, LC.res[0].q) : '';
   }
 
   // ---------- Wheel ----------
